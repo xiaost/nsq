@@ -28,6 +28,11 @@ type nsqdOptions struct {
 	SyncEvery       int64         `flag:"sync-every"`
 	SyncTimeout     time.Duration `flag:"sync-timeout"`
 
+	QueueGCInterval        time.Duration `flag:"queue-gc-interval"`
+	QueueGCRefreshInterval time.Duration `flag:"queue-gc-refresh-interval"`
+	QueueGCNum             int           `flag:"queue-gc-num"`
+	QueueGCDirtyPercent    float64       `flag:"queue-gc-dirty-percent"`
+
 	// msg and command options
 	MsgTimeout    time.Duration `flag:"msg-timeout" arg:"1ms"`
 	MaxMsgTimeout time.Duration `flag:"max-msg-timeout"`
@@ -84,6 +89,11 @@ func NewNSQDOptions() *nsqdOptions {
 		MaxBytesPerFile: 104857600,
 		SyncEvery:       2500,
 		SyncTimeout:     2 * time.Second,
+
+		QueueGCInterval:        100 * time.Millisecond,
+		QueueGCRefreshInterval: 5 * time.Second,
+		QueueGCNum:             20,
+		QueueGCDirtyPercent:    0.25,
 
 		MsgTimeout:    60 * time.Second,
 		MaxMsgTimeout: 15 * time.Minute,

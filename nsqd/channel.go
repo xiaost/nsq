@@ -12,11 +12,7 @@ import (
 
 	"github.com/bitly/nsq/internal/pqueue"
 	"github.com/bitly/nsq/internal/quantile"
-	"github.com/bitly/nsq/internal/util"
 )
-
-// the amount of time a worker will wait when idle
-const defaultWorkerWait = 100 * time.Millisecond
 
 type Consumer interface {
 	UnPause()
@@ -52,7 +48,6 @@ type Channel struct {
 	memoryMsgChan chan *Message
 	clientMsgChan chan *Message
 	exitChan      chan int
-	waitGroup     util.WaitGroupWrapper
 	exitFlag      int32
 
 	// state tracking
@@ -116,9 +111,6 @@ func NewChannel(topicName string, channelName string, ctx *context,
 
 	go c.messagePump()
 
-	c.waitGroup.Wrap(func() { c.deferredWorker() })
-	c.waitGroup.Wrap(func() { c.inFlightWorker() })
-
 	c.ctx.nsqd.Notify(c)
 
 	return c
@@ -177,9 +169,6 @@ func (c *Channel) exit(deleted bool) error {
 	c.RUnlock()
 
 	close(c.exitChan)
-
-	// synchronize the close of router() and pqWorkers (2)
-	c.waitGroup.Wait()
 
 	if deleted {
 		// empty the queue (deletes the backend files, too)
@@ -587,80 +576,50 @@ exit:
 	close(c.clientMsgChan)
 }
 
-func (c *Channel) deferredWorker() {
-	c.pqWorker(&c.deferredPQ, &c.deferredMutex, func(item *pqueue.Item) {
+func (c *Channel) processDeferredQueue(t int64) bool {
+	dirty := false
+	for {
+		c.deferredMutex.Lock()
+		item, _ := c.deferredPQ.PeekAndShift(t)
+		c.deferredMutex.Unlock()
+
+		if item == nil {
+			return dirty
+		}
+		dirty = true
+
 		msg := item.Value.(*Message)
 		_, err := c.popDeferredMessage(msg.ID)
 		if err != nil {
-			return
+			return dirty
 		}
 		c.doRequeue(msg)
-	})
+	}
 }
 
-func (c *Channel) inFlightWorker() {
-	ticker := time.NewTicker(defaultWorkerWait)
+func (c *Channel) processInFlightQueue(t int64) bool {
+	dirty := false
 	for {
-		select {
-		case <-ticker.C:
-		case <-c.exitChan:
-			goto exit
-		}
-		now := time.Now().UnixNano()
-		for {
-			c.inFlightMutex.Lock()
-			msg, _ := c.inFlightPQ.PeekAndShift(now)
-			c.inFlightMutex.Unlock()
+		c.inFlightMutex.Lock()
+		msg, _ := c.inFlightPQ.PeekAndShift(t)
+		c.inFlightMutex.Unlock()
 
-			if msg == nil {
-				break
-			}
-
-			_, err := c.popInFlightMessage(msg.clientID, msg.ID)
-			if err != nil {
-				break
-			}
-			atomic.AddUint64(&c.timeoutCount, 1)
-			c.RLock()
-			client, ok := c.clients[msg.clientID]
-			c.RUnlock()
-			if ok {
-				client.TimedOutMessage()
-			}
-			c.doRequeue(msg)
+		if msg == nil {
+			return dirty
 		}
+		dirty = true
+
+		_, err := c.popInFlightMessage(msg.clientID, msg.ID)
+		if err != nil {
+			return dirty
+		}
+		atomic.AddUint64(&c.timeoutCount, 1)
+		c.RLock()
+		client, ok := c.clients[msg.clientID]
+		c.RUnlock()
+		if ok {
+			client.TimedOutMessage()
+		}
+		c.doRequeue(msg)
 	}
-
-exit:
-	c.ctx.nsqd.logf("CHANNEL(%s): closing ... inFlightWorker", c.name)
-	ticker.Stop()
-}
-
-// generic loop (executed in a goroutine) that periodically wakes up to walk
-// the priority queue and call the callback
-func (c *Channel) pqWorker(pq *pqueue.PriorityQueue, mutex *sync.Mutex, callback func(item *pqueue.Item)) {
-	ticker := time.NewTicker(defaultWorkerWait)
-	for {
-		select {
-		case <-ticker.C:
-		case <-c.exitChan:
-			goto exit
-		}
-		now := time.Now().UnixNano()
-		for {
-			mutex.Lock()
-			item, _ := pq.PeekAndShift(now)
-			mutex.Unlock()
-
-			if item == nil {
-				break
-			}
-
-			callback(item)
-		}
-	}
-
-exit:
-	c.ctx.nsqd.logf("CHANNEL(%s): closing ... pqueue worker", c.name)
-	ticker.Stop()
 }

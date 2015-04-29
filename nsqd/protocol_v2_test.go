@@ -1245,6 +1245,7 @@ func TestClientMsgTimeout(t *testing.T) {
 	opts := NewNSQDOptions()
 	opts.Logger = newTestLogger(t)
 	opts.Verbose = true
+	opts.QueueGCRefreshInterval = 100 * time.Millisecond
 	tcpAddr, _, nsqd := mustStartNSQD(opts)
 	defer nsqd.Exit()
 

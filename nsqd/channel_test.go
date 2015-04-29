@@ -57,6 +57,7 @@ func TestInFlightWorker(t *testing.T) {
 	opts := NewNSQDOptions()
 	opts.Logger = newTestLogger(t)
 	opts.MsgTimeout = 100 * time.Millisecond
+	opts.QueueGCRefreshInterval = 100 * time.Millisecond
 	_, _, nsqd := mustStartNSQD(opts)
 	defer nsqd.Exit()
 

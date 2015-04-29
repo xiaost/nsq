@@ -245,6 +245,7 @@ func (n *NSQD) Main() {
 		http_api.Serve(n.httpListener, httpServer, n.opts.Logger, "HTTP")
 	})
 
+	n.waitGroup.Wrap(func() { n.worker() })
 	n.waitGroup.Wrap(func() { n.idPump() })
 	n.waitGroup.Wrap(func() { n.lookupLoop() })
 	if n.opts.StatsdAddress != "" {
@@ -549,6 +550,102 @@ func (n *NSQD) Notify(v interface{}) {
 			n.Unlock()
 		}
 	})
+}
+
+func uniqRands(l int, n int) []int {
+	set := make(map[int]struct{})
+	nums := make([]int, 0, l)
+	for {
+		num := rand.Intn(n)
+		if _, ok := set[num]; !ok {
+			set[num] = struct{}{}
+			nums = append(nums, num)
+		}
+		if len(nums) == l {
+			goto exit
+		}
+	}
+exit:
+	return nums
+}
+
+func (n *NSQD) worker() {
+	channels := make([]*Channel, 0)
+
+	workTicker := time.NewTicker(n.opts.QueueGCInterval)
+	refreshTicker := time.NewTicker(n.opts.QueueGCRefreshInterval)
+
+	n.RLock()
+	for _, t := range n.topicMap {
+		t.RLock()
+		for _, c := range t.channelMap {
+			channels = append(channels, c)
+		}
+		t.RUnlock()
+	}
+	n.RUnlock()
+
+	for {
+		select {
+		case <-workTicker.C:
+			if len(channels) == 0 {
+				continue
+			}
+		case <-refreshTicker.C:
+			channels = channels[:0]
+			n.RLock()
+			for _, t := range n.topicMap {
+				t.RLock()
+				for _, c := range t.channelMap {
+					channels = append(channels, c)
+				}
+				t.RUnlock()
+			}
+			n.RUnlock()
+			continue
+		case <-n.exitChan:
+			goto exit
+		}
+
+	loop:
+		now := time.Now().UnixNano()
+
+		num := n.opts.QueueGCNum
+		if num > len(channels) {
+			num = len(channels)
+		}
+
+		selected := make([]*Channel, 0, num)
+		for _, i := range uniqRands(num, len(channels)) {
+			selected = append(selected, channels[i])
+		}
+
+		numDirty := 0
+		for _, c := range selected {
+			if c.Exiting() {
+				continue
+			}
+			dirty := false
+			if c.processInFlightQueue(now) {
+				dirty = true
+			}
+			if c.processDeferredQueue(now) {
+				dirty = true
+			}
+			if dirty {
+				numDirty++
+			}
+		}
+
+		if float64(numDirty)/float64(num) > n.opts.QueueGCDirtyPercent {
+			goto loop
+		}
+	}
+
+exit:
+	n.logf("WORKER: closing")
+	workTicker.Stop()
+	refreshTicker.Stop()
 }
 
 func buildTLSConfig(opts *nsqdOptions) (*tls.Config, error) {
