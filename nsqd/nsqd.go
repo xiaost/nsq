@@ -552,23 +552,6 @@ func (n *NSQD) Notify(v interface{}) {
 	})
 }
 
-func uniqRands(l int, n int) []int {
-	set := make(map[int]struct{})
-	nums := make([]int, 0, l)
-	for {
-		num := rand.Intn(n)
-		if _, ok := set[num]; !ok {
-			set[num] = struct{}{}
-			nums = append(nums, num)
-		}
-		if len(nums) == l {
-			goto exit
-		}
-	}
-exit:
-	return nums
-}
-
 func (n *NSQD) worker() {
 	channels := make([]*Channel, 0)
 
@@ -611,14 +594,16 @@ func (n *NSQD) worker() {
 		now := time.Now().UnixNano()
 
 		num := n.opts.QueueGCNum
-		if num > len(channels) {
+		if num < len(channels) { // need shuffle
+			for i := 0; i < num; i++ {
+				j := rand.Intn(len(channels) - i)
+				channels[i], channels[i+j] = channels[i+j], channels[i]
+			}
+		} else {
 			num = len(channels)
 		}
 
-		selected := make([]*Channel, 0, num)
-		for _, i := range uniqRands(num, len(channels)) {
-			selected = append(selected, channels[i])
-		}
+		selected := channels[:num]
 
 		numDirty := 0
 		for _, c := range selected {
